@@ -72,7 +72,16 @@ else
   echo "❌ Skipped copying custom.zshrc"
 fi
 
-# Step 5: Update .zshrc
+# Step 5: Backup existing .zshrc
+if confirm "Do you want to make a backup of your existing .zshrc?"; then
+  BACKUP_FILE="$ZSHRC_FILE.backup.$(date +%Y%m%d%H%M%S)"
+  cp "$ZSHRC_FILE" "$BACKUP_FILE"
+  echo "🗂 Backup created at $BACKUP_FILE"
+else
+  echo "❌ Skipped .zshrc backup"
+fi
+
+# Step 6: Update .zshrc
 if confirm "Do you want to modify your .zshrc to include custom.zshrc before Oh My Zsh loads?"; then
   if grep -q 'source \$ZSH/oh-my-zsh.sh' "$ZSHRC_FILE"; then
     if ! grep -Fxq "$IMPORT_LINE" "$ZSHRC_FILE"; then
