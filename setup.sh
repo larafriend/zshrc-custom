@@ -13,9 +13,21 @@ ZSHRC_FILE="$HOME/.zshrc"
 
 IMPORT_LINE='source $HOME/.oh-my-zsh/custom/custom.zshrc'
 
-# Helper: confirm with user
+# Helper: confirm with user, optionally default to Y or N
 confirm() {
-  read -p "$1 [y/N]: " response
+  local prompt="$1"
+  local default="${2:-Y}"
+  local response
+
+  if [[ "$default" =~ ^[Yy]$ ]]; then
+    prompt="$prompt [Y/n]: "
+  else
+    prompt="$prompt [y/N]: "
+  fi
+
+  read -p "$prompt" response
+  response="${response:-$default}"
+
   case "$response" in
     [yY][eE][sS]|[yY]) return 0 ;;
     *) return 1 ;;
