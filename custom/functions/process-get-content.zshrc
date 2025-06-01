@@ -1,165 +1,147 @@
-# ------------------------------------------------------------------------------
-# pgc - Process and extract contents of files and directories into a single file
+# pgc – Process & concatenate files/directories into a single text file
+# ----------------------------------------------------------------------
+# DESCRIPTION:
+#   Concatenates the contents of one or more files and/or directories into
+#   a single output file. Supports filtering with include/exclude patterns,
+#   appending to existing output, and opening the result in an editor.
 #
-# Usage:
-#   pgc [OPTIONS] <path> [...]
+# FEATURES:
+#   * Efficient file handling (reuses output FD)
+#   * Clean, robust option parsing using zparseopts
+#   * Filtering support with --only and --exclude
+#   * Optional output appending with --append
+#   * GUI editor integration with --open
+#   * Verbose mode with --verbose to print processed files
 #
-# Options:
-#   --only <pattern1,pattern2,...>     Include only files matching these glob patterns.
-#   --exclude <pattern1,pattern2,...>  Exclude files matching these glob patterns.
-#   --output <filename>                Specify output file (default: .temp).
-#   --open                             Open the output file in your editor.
+# OPTIONS:
+#   --only=PAT1,PAT2,...      Include only files matching these glob patterns
+#   --exclude=PAT1,PAT2,...   Exclude files matching these glob patterns
+#   --output=FILE             Specify the output file (default: .temp)
+#   --append                  Append to the output file instead of overwriting
+#   --open                    Open the result in a GUI editor (phpstorm/code/...)
+#   --verbose                 Print the list of files being processed
 #
-# Glob pattern cheatsheet (comma‑separated, no spaces):
-#   folder              # whole directory
-#   file.ext            # single file
-#   *.ext               # any file with ext
-#   file.*              # any extension
-#   folder/*.ext        # one level deep
-#   folder/img*.ext     # starting with img
-#   folder/img/*.ext    # in img subdir
-#   folder/**/*.ext     # any depth under folder
-#   folder/**/img/*.ext # img dirs at any depth
-#   **/*.ext            # anywhere under current dir
+# USAGE EXAMPLES:
+#   # Basic: Concatenate all *.txt files in current directory
+#     pgc *.txt
 #
-# Examples:
-#   # Only JS/TS files inside src
-#   pgc src --only "src/**/*.js,src/**/*.ts" --open
+#   # Recursively collect files from directory and concatenate
+#     pgc ./docs
 #
-#   # Combine everything except markdown or txt under docs and src
-#   pgc ./docs ./src --exclude "**/*.md,**/*.txt" --output combined.txt
+#   # Concatenate files, excluding all *.log files
+#     pgc --exclude="*.log" *.txt ./logs
 #
-#   # Dump all PHP files except tests directory
-#   pgc project --only "**/*.php" --exclude "**/tests/**"
+#   # Concatenate only markdown and txt files from a folder
+#     pgc --only="*.md,*.txt" ./notes
 #
-#   # Include images but skip thumbnails
-#   pgc assets --only "**/*.png,**/*.jpg" --exclude "**/*thumb*.*"
+#   # Append new content to an existing file
+#     pgc --append --output=combined.txt *.md
 #
-# Notes:
-#   * Patterns are resolved with zsh's extended globbing (set -o extended_glob).
-#   * A file is included only if it matches at least one --only pattern (when --only
-#     is given) and none of the --exclude patterns.
-# ------------------------------------------------------------------------------
+#   # Open the result in your preferred GUI editor
+#     pgc --open --output=all_code.txt *.py
+#
+#   # Combine and filter with both include and exclude
+#     pgc --only="*.md" --exclude="README.md" ./docs
+#
+#   # Verbose: show all processed files
+#     pgc --verbose --output=summary.txt *.conf
+# ----------------------------------------------------------------------
 
-pgc() {
-    emulate -L zsh
-    set -o extended_glob
+function pgc() {
+  emulate -L zsh -o extended_glob -o null_glob
 
-    local output_file=".temp"
-    local -a only_patterns=()
-    local -a exclude_patterns=()
-    local open_file=false
+  # Disable xtrace to suppress debug output even if globally enabled
+  set +x 2>/dev/null
 
-    # Parse options
-    while [[ $# -gt 0 && "$1" == --* ]]; do
-        case "$1" in
-            --only)
-                IFS=',' read -rA only_patterns <<< "${2// /}"
-                shift 2
-                ;;
-            --exclude)
-                IFS=',' read -rA exclude_patterns <<< "${2// /}"
-                shift 2
-                ;;
-            --output)
-                output_file="$2"
-                shift 2
-                ;;
-            --open)
-                open_file=true
-                shift
-                ;;
-            *)
-                echo "Unknown option: $1" >&2
-                return 1
-                ;;
-        esac
+  #‑‑‑‑‑ helpers ‑‑‑‑‑
+  warn() print -u2 -P "%F{yellow}pgc:%f $*"
+  die()  { print -u2 -P "%F{red}pgc:%f $*"; return 1 }
+
+  #‑‑‑‑‑ defaults ‑‑‑‑‑
+  local output_file=.temp append=false open=false verbose=false
+  local -a only_patterns exclude_patterns specs
+
+  #‑‑‑‑‑ option parsing ‑‑‑‑‑
+  local -a _only _exclude _output _append _open _verbose
+  zparseopts -D -E -K \
+    -only:=_only     -exclude:=_exclude \
+    -output:=_output -append=_append \
+    -open=_open      -verbose=_verbose || return 1
+
+  (( $# )) || die "No paths supplied."
+  specs=("$@")
+
+  (( ${#_only}    )) && IFS=',' read -rA only_patterns    <<< "${_only[2]// /}"
+  (( ${#_exclude} )) && IFS=',' read -rA exclude_patterns <<< "${_exclude[2]// /}"
+  (( ${#_output}  )) && output_file=${_output[2]}
+  (( ${#_append}  )) && append=true
+  (( ${#_open}    )) && open=true
+  (( ${#_verbose} )) && verbose=true
+
+  #‑‑‑‑‑ collect positional specs ‑‑‑‑‑
+  local -a targets
+  local spec
+  for spec in "${specs[@]}"; do
+    local -a hits=( ${(N)~spec} )
+    (( ${#hits} )) || { warn "'$spec' did not match"; continue }
+    local m
+
+    set +x 2>/dev/null
+
+    for m in "${hits[@]}"; do
+      if [[ -d $m ]]; then
+        targets+=( $m/**/*(DN.) )  # recurse: dotfiles + plain files only
+      elif [[ -f $m ]]; then
+        targets+=( $m )
+      else
+        warn "'$m' is not a file or directory"
+      fi
     done
+  done
+  (( ${#targets} )) || die "No files collected."
 
-    if (( $# == 0 )); then
-        echo "Error: No files or directories provided." >&2
-        return 1
-    fi
+  # unique while preserving original order
+  typeset -aU targets=("${targets[@]}")
 
-    : > "$output_file"  # Truncate output file
-
-    local item file rel include pat
-    for item in "$@"; do
-        if [[ -f $item ]]; then
-            rel=${item#./}
-            include=1
-
-            if (( ${#only_patterns[@]} )); then
-                include=0
-                for pat in "${only_patterns[@]}"; do
-                    if [[ $rel == ${~pat} ]]; then
-                        include=1
-                        break
-                    fi
-                done
-            fi
-
-            if (( include && ${#exclude_patterns[@]} )); then
-                for pat in "${exclude_patterns[@]}"; do
-                    if [[ $rel == ${~pat} ]]; then
-                        include=0
-                        break
-                    fi
-                done
-            fi
-
-            (( include )) && {
-                printf '"%s\n' "$item" >> "$output_file"
-                cat -- "$item" >> "$output_file"
-                printf '\",\n' >> "$output_file"
-            }
-        elif [[ -d $item ]]; then
-            find "$item" -type f | while IFS= read -r file; do
-                rel=${file#./}
-                include=1
-
-                if (( ${#only_patterns[@]} )); then
-                    include=0
-                    for pat in "${only_patterns[@]}"; do
-                        if [[ $rel == ${~pat} ]]; then
-                            include=1
-                            break
-                        fi
-                    done
-                fi
-
-                if (( include && ${#exclude_patterns[@]} )); then
-                    for pat in "${exclude_patterns[@]}"; do
-                        if [[ $rel == ${~pat} ]]; then
-                            include=0
-                            break
-                        fi
-                    done
-                fi
-
-                (( include )) && {
-                    printf '"%s\n' "$file" >> "$output_file"
-                    cat -- "$file" >> "$output_file"
-                    printf '\",\n' >> "$output_file"
-                }
-            done
-        else
-            echo "Warning: '$item' is not a valid file or directory." >&2
-        fi
+  #‑‑‑‑‑ filtering ‑‑‑‑‑
+  local -a filtered=("${targets[@]}")
+  if (( ${#only_patterns} )); then
+    local pat; local -a keep
+    for pat in "${only_patterns[@]}"; do
+      keep+=( ${(M)filtered:#${~pat}} )
     done
+    filtered=( ${(u)keep} )   # unique again
+  fi
+  if (( ${#exclude_patterns} )); then
+    local pat
+    for pat in "${exclude_patterns[@]}"; do
+      filtered=( ${(R)filtered:#${~pat}} )
+    done
+  fi
+  (( ${#filtered} )) || die "No files remain after filtering."
 
-    # Optionally open in default editor
-    if [[ -s "$output_file" && $open_file == true ]]; then
-        if command -v phpstorm &> /dev/null; then
-            phpstorm "$output_file"
-        elif command -v code &> /dev/null; then
-            code "$output_file"
-        elif command -v xdg-open &> /dev/null; then
-            xdg-open "$output_file"
-        elif command -v open &> /dev/null; then
-            open "$output_file"
-        else
-            echo "Warning: No command found to open the file automatically." >&2
-        fi
-    fi
+  #‑‑‑‑‑ emit ‑‑‑‑‑
+  local redir=">"; $append && redir=">>"
+  local fd; eval "exec {fd}$redir'$output_file'"
+
+  local f
+  for f in "${filtered[@]}"; do
+    $verbose && print -P "%F{cyan}Processing:%f $f"
+    print -u $fd -- "\"$f"
+    cat -- "$f" >&$fd
+    print -u $fd -- "\","  # comma separator
+  done
+  exec {fd}>&-
+
+  #‑‑‑‑‑ open in editor if requested ‑‑‑‑‑
+  if $open && [[ -s $output_file ]]; then
+    local opener
+    for opener in phpstorm code xdg-open open; do
+      if command -v $opener &>/dev/null; then
+        $opener "$output_file" &!
+        break
+      fi
+    done
+    [[ -z $opener ]] && warn "No GUI opener found."
+  fi
 }
