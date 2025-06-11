@@ -83,6 +83,13 @@ function pgc() {
   local spec
   for spec in "${specs[@]}"; do
     local -a hits=( ${(N)~spec} )
+
+    if [[ -e $spec ]]; then
+        hits=( $spec )
+    else
+        hits=( ${(N)~spec} )
+    fi
+
     (( ${#hits} )) || { warn "'$spec' did not match"; continue }
     local m
 
